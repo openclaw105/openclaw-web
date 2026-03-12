@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>五子棋对战 - 房间模式</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        h1 { color: #fff; margin-bottom: 20px; text-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
+        .rooms { display: flex; gap: 30px; margin-bottom: 30px; }
+        .room {
+            background: rgba(255,255,255,0.1);
+            border: 2px solid rgba(255,255,255,0.2);
+            border-radius: 20px;
+            padding: 30px 50px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            min-width: 180px;
+        }
+        .room:hover { transform: translateY(-5px); background: rgba(255,255,255,0.15); }
+        .room.waiting { border-color: #4ecdc4; background: rgba(78,205,196,0.2); }
+        .room.full { border-color: #ff6b6b; opacity: 0.6; cursor: not-allowed; }
+        .room-title { color: #fff; font-size: 24px; font-weight: bold; margin-bottom: 10px; }
+        .room-status { color: #aaa; font-size: 14px; margin-top: 10px; }
+        .room.waiting .room-status { color: #4ecdc4; }
+        .room-icon { font-size: 40px; margin-bottom: 10px; }
+        .info { color: #aaa; margin: 20px 0; font-size: 14px; }
+        .status { color: #fff; font-size: 18px; margin-bottom: 15px; padding: 10px 20px; background: rgba(255,255,255,0.1); border-radius: 25px; }
+        .board { background: #deb887; padding: 15px; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); display: none; }
+        canvas { display: block; cursor: pointer; }
+        .btn-group { margin-top: 20px; display: flex; gap: 15px; }
+        button {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .btn-restart { background: #ff6b6b; color: white; }
+        .btn-back { background: #666; color: white; }
+        .btn-restart:hover, .btn-back:hover { transform: scale(1.05); }
+        .winner {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.95);
+            color: #ffd700;
+            padding: 50px 80px;
+            border-radius: 25px;
+            font-size: 36px;
+            display: none;
+            z-index: 100;
+            text-align: center;
+            animation: popIn 0.5s ease;
+            border: 3px solid #ffd700;
+        }
+        @keyframes popIn {
+            from { transform: translate(-50%, -50%) scale(0); }
+            to { transform: translate(-50%, -50%) scale(1); }
+        }
+        .winner.show { display: block; }
+        .winner button { margin-top: 25px; font-size: 18px; }
+        .last-move { position: absolute; border: 3px solid red; border-radius: 50%; width: 20px; height: 20px; pointer-events: none; }
+        .connection-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            background: #666;
+            color: white;
+        }
+        .connection-status.connected { background: #4ecdc4; }
+        .waiting-anim { animation: pulse 1.5s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="connection-status" id="connStatus">未连接</div>
+    <h1>🎮 五子棋对战</h1>
+    
+    <div class="rooms" id="roomsPanel">
+        <div class="room" onclick="joinRoom('room1')" id="room1">
+            <div class="room-icon">🏠</div>
+            <div class="room-title">房间 1</div>
+            <div class="room-status" id="status1">点击加入</div>
+        </div>
+        <div class="room" onclick="joinRoom('room2')" id="room2">
+            <div class="room-icon">🏠</div>
+            <div class="room-title">房间 2</div>
+            <div class="room-status" id="status2">点击加入</div>
+        </div>
+    </div>
+    
+    <div class="info" id="info">选择一个房间加入，或等待其他玩家</div>
+    
+    <div class="status" id="gameStatus" style="display:none;"></div>
+    <div class="board" id="boardPanel">
+        <canvas id="board" width="450" height="450"></canvas>
+    </div>
+    <div class="btn-group" id="btnGroup" style="display:none;">
+        <button class="btn-restart" onclick="requestRestart()">🔄 请求重玩</button>
+        <button class="btn-back" onclick="leaveRoom()">🚪 退出房间</button>
+    </div>
+    
+    <div class="winner" id="winner">
+        <div id="winnerText"></div>
+        <button class="btn-restart" onclick="requestRestart()">再来一局</button>
+    </div>
+
+    <script>
+        // ===== 房间状态管理 =====
+        const rooms = {
+            'room1': { peer: null, conn: null, status: 'empty' },
+            'room2': { peer: null, conn: null, status: 'empty' }
+        };
+        let currentRoom = null;
+        let myPlayer = 0;
+        let isMyTurn = false;
+        
+        // ===== 棋盘配置 =====
+        const canvas = document.getElementById('board');
+        const ctx = canvas.getContext('2d');
+        const CELL_SIZE = 30;
+        const MARGIN = 15;
+        const BOARD_SIZE = 15;
+        let board = [];
+        let gameOver = false;
+        let lastMove = null;
+        
+        // ===== 初始化 =====
+        function initBoard() {
+            board = [];
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                board[i] = [];
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    board[i][j] = 0;
+                }
+            }
+            lastMove = null;
+        }
+        
+        // ===== 绘制棋盘 =====
+        function drawBoard() {
+            ctx.fillStyle = '#deb887';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = '#8b4513';
+            ctx.lineWidth = 1;
+            
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                ctx.beginPath();
+                ctx.moveTo(MARGIN, MARGIN + i * CELL_SIZE);
+                ctx.lineTo(MARGIN + (BOARD_SIZE - 1) * CELL_SIZE, MARGIN + i * CELL_SIZE);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(MARGIN + i * CELL_SIZE, MARGIN);
+                ctx.lineTo(MARGIN + i * CELL_SIZE, MARGIN + (BOARD_SIZE - 1) * CELL_SIZE);
+                ctx.stroke();
+            }
+            
+            // 星位
+            const starPoints = [[3,3], [3,11], [11,3], [11,11], [7,7]];
+            ctx.fillStyle = '#8b4513';
+            starPoints.forEach(([x, y]) => {
+                ctx.beginPath();
+                ctx.arc(MARGIN + x * CELL_SIZE, MARGIN + y * CELL_SIZE, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            
+            // 绘制棋子
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    if (board[i][j] !== 0) drawPiece(i, j, board[i][j]);
+                }
+            }
+            
+            // 最后一手标记
+            if (lastMove) {
+                ctx.strokeStyle = '#ff0000';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(MARGIN + lastMove.x * CELL_SIZE, MARGIN + lastMove.y * CELL_SIZE, 10, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+        
+        function drawPiece(x, y, player) {
+            const cx = MARGIN + x * CELL_SIZE;
+            const cy = MARGIN + y * CELL_SIZE;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 13, 0, Math.PI * 2);
+            const gradient = ctx.createRadialGradient(cx - 3, cy - 3, 0, cx, cy, 13);
+            if (player === 1) {
+                gradient.addColorStop(0, '#666');
+                gradient.addColorStop(1, '#000');
+            } else {
+                gradient.addColorStop(0, '#fff');
+                gradient.addColorStop(1, '#ddd');
+            }
+            ctx.fillStyle = gradient;
+            ctx.fill();
+            ctx.strokeStyle = player === 1 ? '#000' : '#fff';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+        
+        // ===== 落子事件 =====
+        canvas.addEventListener('click', (e) => {
+            if (gameOver || !isMyTurn || myPlayer === 0) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.round((e.clientX - rect.left - MARGIN) / CELL_SIZE);
+            const y = Math.round((e.clientY - rect.top - MARGIN) / CELL_SIZE);
+            if (x >= 0 && x < BOARD_SIZE && y >= 0 && y < BOARD_SIZE && board[x][y] === 0) {
+                board[x][y] = myPlayer;
+                lastMove = {x, y};
+                drawBoard();
+                sendData({ type: 'move', x, y });
+                
+                const winInfo = checkWin(x, y);
+                if (winInfo) {
+                    showWinner(myPlayer, winInfo);
+                    gameOver = true;
+                } else {
+                    isMyTurn = false;
+                    updateStatus();
+                }
+            }
+        });
+        
+        // ===== 优化胜利判定 =====
+        function checkWin(x, y) {
+            const player = board[x][y];
+            const directions = [
+                [[1, 0], [-1, 0]],   // 水平
+                [[0, 1], [0, -1]],  // 垂直
+                [[1, 1], [-1, -1]], // 主对角线
+                [[1, -1], [-1, 1]]  // 副对角线
+            ];
+            
+            for (let d = 0; d < directions.length; d++) {
+                const [dir1, dir2] = directions[d];
+                let count = 1;
+                let positions = [{x, y}];
+                
+                // 正方向
+                let dx = dir1[0], dy = dir1[1];
+                let nx = x + dx, ny = y + dy;
+                while (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE && board[nx][ny] === player) {
+                    count++;
+                    positions.push({x: nx, y: ny});
+                    nx += dx;
+                    ny += dy;
+                }
+                
+                // 反方向
+                dx = dir2[0]; dy = dir2[1];
+                nx = x + dx; ny = y + dy;
+                while (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE && board[nx][ny] === player) {
+                    count++;
+                    positions.push({x: nx, y: ny});
+                    nx += dx;
+                    ny += dy;
+                }
+                
+                if (count >= 5) {
+                    return { count, direction: d, positions };
+                }
+            }
+            return null;
+        }
+        
+        function showWinner(player, winInfo) {
+            const winnerText = document.getElementById('winnerText');
+            const isMe = player === myPlayer;
+            winnerText.innerHTML = isMe 
+                ? `🏆 你赢了！<br><span style="font-size:20px;color:#fff">连成 ${winInfo.count} 子！</span>`
+                : `😢 你输了！<br><span style="font-size:20px;color:#fff">对手连成 ${winInfo.count} 子</span>`;
+            document.getElementById('winner').classList.add('show');
+            drawWinLine(winInfo.positions);
+        }
+        
+        function drawWinLine(positions) {
+            if (positions.length < 5) return;
+            const start = positions[0];
+            const end = positions[positions.length - 1];
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(MARGIN + start.x * CELL_SIZE, MARGIN + start.y * CELL_SIZE);
+            ctx.lineTo(MARGIN + end.x * CELL_SIZE, MARGIN + end.y * CELL_SIZE);
+            ctx.stroke();
+        }
+        
+        // ===== 网络通信 =====
+        function joinRoom(roomName) {
+            if (rooms[roomName].status === 'full') return;
+            
+            currentRoom = roomName;
+            const peerId = 'gobang-' + roomName;
+            
+            // 先检查房间状态
+            checkRoomStatus(roomName);
+            
+            // 创建Peer连接
+            const peer = new Peer(peerId);
+            rooms[roomName].peer = peer;
+            
+            peer.on('open', () => {
+                document.getElementById('connStatus').textContent = '等待对手...';
+                document.getElementById('connStatus').className = 'connection-status waiting-anim';
+                
+                // 作为房主，等待连接
+                myPlayer = 1;
+                isMyTurn = true;
+                
+                peer.on('connection', (conn) => {
+                    rooms[roomName].conn = conn;
+                    setupConnection(conn, 2);
+                });
+            });
+            
+            peer.on('error', (err) => {
+                if (err.type === 'unavailable-id') {
+                    // 房间已有人，尝试加入作为玩家2
+                    joinAsPlayer2(roomName);
+                } else {
+                    alert('连接失败: ' + err.message);
+                }
+            });
+            
+            // 定时检查房间状态更新UI
+            updateRoomUI();
+        }
+        
+        function joinAsPlayer2(roomName) {
+            const peerId = 'gobang-' + roomName + '-' + Date.now();
+            const peer = new Peer(peerId);
+            rooms[roomName].peer = peer;
+            
+            peer.on('open', () => {
+                const conn = peer.connect('gobang-' + roomName);
+                rooms[roomName].conn = conn;
+                setupConnection(conn, 2);
+            });
+            
+            peer.on('error', (err) => {
+                alert('加入房间失败: ' + err.message);
+            });
+        }
+        
+        function checkRoomStatus(roomName) {
+            // 尝试连接检测房间是否有人
+            const testPeer = new Peer('check-' + roomName + '-' + Date.now());
+            testPeer.on('open', () => {
+                const testConn = testPeer.connect('gobang-' + roomName);
+                testConn.on('open', () => {
+                    rooms[roomName].status = 'waiting';
+                    testConn.close();
+                    testPeer.destroy();
+                });
+                setTimeout(() => {
+                    if (rooms[roomName].status !== 'waiting') {
+                        rooms[roomName].status = 'empty';
+                        updateRoomUI();
+                    }
+                }, 3000);
+            });
+            testPeer.on('error', () => {
+                rooms[roomName].status = 'waiting';
+                updateRoomUI();
+            });
+        }
+        
+        function updateRoomUI() {
+            for (const roomName of ['room1', 'room2']) {
+                const roomEl = document.getElementById(roomName);
+                const statusEl = document.getElementById('status' + roomName.charAt(4));
+                
+                if (rooms[roomName].status === 'waiting') {
+                    roomEl.classList.add('waiting');
+                    statusEl.textContent = '✅ 等待中...';
+                } else if (rooms[roomName].status === 'full') {
+                    roomEl.classList.add('full');
+                    statusEl.textContent = '❌ 已满';
+                } else {
+                    roomEl.classList.remove('waiting', 'full');
+                    statusEl.textContent = '点击加入';
+                }
+            }
+        }
+        
+        function setupConnection(conn, playerNum) {
+            conn.on('open', () => {
+                document.getElementById('connStatus').textContent = '已连接';
+                document.getElementById('connStatus').className = 'connection-status connected';
+                
+                myPlayer = playerNum;
+                isMyTurn = (playerNum === 1);
+                
+                document.getElementById('roomsPanel').style.display = 'none';
+                document.getElementById('info').style.display = 'none';
+                document.getElementById('gameStatus').style.display = 'block';
+                document.getElementById('boardPanel').style.display = 'block';
+                document.getElementById('btnGroup').style.display = 'flex';
+                
+                initBoard();
+                drawBoard();
+                updateStatus();
+                
+                rooms[currentRoom].status = 'full';
+            });
+            
+            conn.on('data', (data) => {
+                if (data.type === 'move') {
+                    handleMove(data);
+                } else if (data.type === 'restart') {
+                    handleRestart();
+                } else if (data.type === 'restart-ack') {
+                    alert('对方同意重玩！');
+                    restartGame();
+                } else if (data.type === 'restart-sync') {
+                    restartGame();
+                }
+            });
+            
+            conn.on('close', () => {
+                alert('对手已离开房间');
+                leaveRoom();
+            });
+        }
+        
+        function handleMove(data) {
+            const opponent = myPlayer === 1 ? 2 : 1;
+            board[data.x][data.y] = opponent;
+            lastMove = {x: data.x, y: data.y};
+            drawBoard();
+            
+            const winInfo = checkWin(data.x, data.y);
+            if (winInfo) {
+                showWinner(opponent, winInfo);
+                gameOver = true;
+            } else {
+                isMyTurn = true;
+                updateStatus();
+            }
+        }
+        
+        function sendData(data) {
+            const conn = rooms[currentRoom]?.conn;
+            if (conn && conn.open) {
+                conn.send(data);
+            }
+        }
+        
+        function updateStatus() {
+            const statusEl = document.getElementById('gameStatus');
+            if (myPlayer === 0) {
+                statusEl.textContent = '等待对手...';
+            } else if (isMyTurn) {
+                statusEl.textContent = myPlayer === 1 ? '⚫ 你的回合 (黑方-先手)' : '⚪ 你的回合 (白方-后手)';
+                statusEl.style.background = 'rgba(78,205,196,0.3)';
+            } else {
+                statusEl.textContent = myPlayer === 1 ? '⚪ 对方回合 (白方)' : '⚫ 对方回合 (黑方)';
+                statusEl.style.background = 'rgba(255,107,107,0.3)';
+            }
+        }
+        
+        function requestRestart() {
+            sendData({ type: 'restart' });
+            alert('已发送重玩请求，等待对方同意...');
+        }
+        
+        function handleRestart() {
+            if (confirm('对方请求重玩，是否同意？')) {
+                sendData({ type: 'restart-ack' });
+                restartGame();
+            }
+        }
+        
+        function restartGame() {
+            initBoard();
+            gameOver = false;
+            isMyTurn = true;
+            drawBoard();
+            updateStatus();
+            document.getElementById('winner').classList.remove('show');
+            sendData({ type: 'restart-sync' });
+        }
+        
+        function leaveRoom() {
+            if (currentRoom && rooms[currentRoom].conn) {
+                rooms[currentRoom].conn.close();
+            }
+            if (currentRoom && rooms[currentRoom].peer) {
+                rooms[currentRoom].peer.destroy();
+            }
+            rooms[currentRoom] = { peer: null, conn: null, status: 'empty' };
+            location.reload();
+        }
+        
+        // 定时更新房间状态
+        setInterval(updateRoomUI, 2000);
+        initBoard();
+    </script>
+</body>
+</html>
