@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>五子棋对战 - 异地同屏</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        h1 { color: #fff; margin-bottom: 15px; text-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
+        .status { color: #fff; font-size: 16px; margin-bottom: 10px; padding: 8px 16px; background: rgba(255,255,255,0.1); border-radius: 20px; }
+        .room-panel {
+            background: rgba(255,255,255,0.1);
+            padding: 20px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .room-panel input {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            width: 200px;
+            margin: 5px;
+        }
+        .room-panel button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            margin: 5px;
+            transition: all 0.3s;
+            font-weight: bold;
+        }
+        .btn-create { background: #4ecdc4; color: white; }
+        .btn-join { background: #ff6b6b; color: white; }
+        .btn-create:hover, .btn-join:hover { transform: scale(1.05); }
+        .room-id { 
+            background: rgba(0,0,0,0.3); 
+            padding: 15px; 
+            border-radius: 10px; 
+            margin: 15px 0;
+            word-break: break-all;
+        }
+        .room-id code { 
+            color: #4ecdc4; 
+            font-size: 18px; 
+            font-weight: bold;
+        }
+        .board { background: #deb887; padding: 15px; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        canvas { display: block; cursor: pointer; }
+        .btn-group { margin-top: 15px; display: flex; gap: 15px; }
+        button.action-btn {
+            padding: 10px 25px;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .btn-restart { background: #ff6b6b; color: white; }
+        .btn-copy { background: #4ecdc4; color: white; }
+        .btn-restart:hover, .btn-copy:hover { transform: scale(1.05); }
+        .info { color: #aaa; margin-top: 15px; font-size: 14px; }
+        .winner {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            color: #ffd700;
+            padding: 40px 60px;
+            border-radius: 20px;
+            font-size: 28px;
+            display: none;
+            z-index: 100;
+            text-align: center;
+            animation: popIn 0.5s ease;
+        }
+        @keyframes popIn {
+            from { transform: translate(-50%, -50%) scale(0); }
+            to { transform: translate(-50%, -50%) scale(1); }
+        }
+        .winner.show { display: block; }
+        .connection-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            background: #666;
+            color: white;
+        }
+        .connection-status.connected { background: #4ecdc4; }
+        .connection-status.connecting { background: #ffa500; }
+    </style>
+</head>
+<body>
+    <div class="connection-status" id="connStatus">未连接</div>
+    <h1>🎮 五子棋对战 - 异地同屏</h1>
+    
+    <div class="room-panel" id="roomPanel">
+        <div>
+            <input type="text" id="roomIdInput" placeholder="输入房间号">
+            <button class="btn-join" onclick="joinRoom()">加入房间</button>
+        </div>
+        <div style="margin: 15px 0; color: #aaa;">或</div>
+        <button class="btn-create" onclick="createRoom()">创建房间</button>
+        <div class="room-id" id="roomIdDisplay" style="display:none;">
+            <p style="color:#aaa;font-size:12px;margin-bottom:5px;">房间号（发给朋友）：</p>
+            <code id="roomIdText"></code>
+            <br><br>
+            <button class="btn-copy" onclick="copyRoomId()">📋 复制房间号</button>
+        </div>
+    </div>
+    
+    <div class="status" id="status" style="display:none;">等待对方加入...</div>
+    <div class="board" id="boardPanel" style="display:none;">
+        <canvas id="board" width="450" height="450"></canvas>
+    </div>
+    <div class="btn-group" id="btnGroup" style="display:none;">
+        <button class="action-btn btn-restart" onclick="requestRestart()">🔄 请求重玩</button>
+    </div>
+    <div class="info" id="gameInfo" style="display:none;">提示：点击棋盘落子，五子连珠获胜！</div>
+    
+    <div class="winner" id="winner">
+        <div id="winnerText"></div>
+        <button class="action-btn btn-restart" onclick="requestRestart()" style="margin-top:20px;">再来一局</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('board');
+        const ctx = canvas.getContext('2d');
+        const CELL_SIZE = 30;
+        const MARGIN = 15;
+        const BOARD_SIZE = 15;
+        
+        let peer = null;
+        let conn = null;
+        let myPlayer = 0; // 0: 未分配, 1: 黑方(先手), 2: 白方(后手)
+        let isMyTurn = false;
+        let board = [];
+        let gameOver = false;
+        let roomId = null;
+        let opponentConnected = false;
+        
+        function initBoard() {
+            board = [];
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                board[i] = [];
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    board[i][j] = 0;
+                }
+            }
+        }
+        
+        function drawBoard() {
+            ctx.fillStyle = '#deb887';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = '#8b4513';
+            ctx.lineWidth = 1;
+            
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                ctx.beginPath();
+                ctx.moveTo(MARGIN, MARGIN + i * CELL_SIZE);
+                ctx.lineTo(MARGIN + (BOARD_SIZE - 1) * CELL_SIZE, MARGIN + i * CELL_SIZE);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(MARGIN + i * CELL_SIZE, MARGIN);
+                ctx.lineTo(MARGIN + i * CELL_SIZE, MARGIN + (BOARD_SIZE - 1) * CELL_SIZE);
+                ctx.stroke();
+            }
+            
+            const starPoints = [[3,3], [3,11], [11,3], [11,11], [7,7]];
+            ctx.fillStyle = '#8b4513';
+            starPoints.forEach(([x, y]) => {
+                ctx.beginPath();
+                ctx.arc(MARGIN + x * CELL_SIZE, MARGIN + y * CELL_SIZE, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    if (board[i][j] !== 0) drawPiece(i, j, board[i][j]);
+                }
+            }
+        }
+        
+        function drawPiece(x, y, player) {
+            const cx = MARGIN + x * CELL_SIZE;
+            const cy = MARGIN + y * CELL_SIZE;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 13, 0, Math.PI * 2);
+            const gradient = ctx.createRadialGradient(cx - 3, cy - 3, 0, cx, cy, 13);
+            if (player === 1) {
+                gradient.addColorStop(0, '#666');
+                gradient.addColorStop(1, '#000');
+            } else {
+                gradient.addColorStop(0, '#fff');
+                gradient.addColorStop(1, '#ddd');
+            }
+            ctx.fillStyle = gradient;
+            ctx.fill();
+            ctx.strokeStyle = player === 1 ? '#000' : '#fff';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+        
+        function updateStatus() {
+            const status = document.getElementById('status');
+            if (myPlayer === 0) {
+                status.textContent = '等待对手加入...';
+            } else if (isMyTurn) {
+                status.textContent = myPlayer === 1 ? '⚫ 你的回合 (黑方)' : '⚪ 你的回合 (白方)';
+            } else {
+                status.textContent = myPlayer === 1 ? '⚪ 对方回合 (白方)' : '⚫ 对方回合 (黑方)';
+            }
+        }
+        
+        function showWinner(player) {
+            const winnerText = document.getElementById('winnerText');
+            if (player === myPlayer) {
+                winnerText.textContent = '🏆 你赢了！';
+            } else {
+                winnerText.textContent = '😢 你输了！';
+            }
+            document.getElementById('winner').classList.add('show');
+        }
+        
+        function checkWin(x, y) {
+            const directions = [[[1,0],[-1,0]], [[0,1],[0,-1]], [[1,1],[-1,-1]], [[1,-1],[-1,1]]];
+            const player = board[x][y];
+            for (const [dir1, dir2] of directions) {
+                let count = 1;
+                let dx = dir1[0], dy = dir1[1];
+                let nx = x + dx, ny = y + dy;
+                while (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE && board[nx][ny] === player) { count++; nx += dx; ny += dy; }
+                dx = dir2[0]; dy = dir2[1];
+                nx = x + dx; ny = y + dy;
+                while (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE && board[nx][ny] === player) { count++; nx += dx; ny += dy; }
+                if (count >= 5) return true;
+            }
+            return false;
+        }
+        
+        canvas.addEventListener('click', (e) => {
+            if (gameOver || !isMyTurn || myPlayer === 0) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.round((e.clientX - rect.left - MARGIN) / CELL_SIZE);
+            const y = Math.round((e.clientY - rect.top - MARGIN) / CELL_SIZE);
+            if (x >= 0 && x < BOARD_SIZE && y >= 0 && y < BOARD_SIZE && board[x][y] === 0) {
+                board[x][y] = myPlayer;
+                drawBoard();
+                sendMove(x, y);
+                if (checkWin(x, y)) {
+                    showWinner(myPlayer);
+                    gameOver = true;
+                } else {
+                    isMyTurn = false;
+                    updateStatus();
+                }
+            }
+        });
+        
+        function sendMove(x, y) {
+            if (conn && conn.open) {
+                conn.send({ type: 'move', x, y });
+            }
+        }
+        
+        function handleMove(data) {
+            const opponent = myPlayer === 1 ? 2 : 1;
+            board[data.x][data.y] = opponent;
+            drawBoard();
+            if (checkWin(data.x, data.y)) {
+                showWinner(opponent);
+                gameOver = true;
+            } else {
+                isMyTurn = true;
+                updateStatus();
+            }
+        }
+        
+        function requestRestart() {
+            if (conn && conn.open) {
+                conn.send({ type: 'restart' });
+                alert('已发送重玩请求，等待对方同意...');
+            }
+        }
+        
+        function handleRestart() {
+            if (confirm('对方请求重玩，是否同意？')) {
+                if (conn && conn.open) conn.send({ type: 'restart-ack' });
+                restartGame();
+            }
+        }
+        
+        function restartGame() {
+            initBoard();
+            gameOver = false;
+            myPlayer = 1;
+            isMyTurn = true;
+            drawBoard();
+            updateStatus();
+            document.getElementById('winner').classList.remove('show');
+            if (conn && conn.open) conn.send({ type: 'restart-sync' });
+        }
+        
+        function createRoom() {
+            peer = new Peer();
+            peer.on('open', (id) => {
+                roomId = id;
+                document.getElementById('roomIdText').textContent = id;
+                document.getElementById('roomIdDisplay').style.display = 'block';
+                document.getElementById('status').style.display = 'block';
+                document.getElementById('connStatus').textContent = '等待连接...';
+                document.getElementById('connStatus').className = 'connection-status connecting';
+                myPlayer = 1;
+                isMyTurn = true;
+            });
+            
+            peer.on('connection', (c) => {
+                conn = c;
+                setupConnection();
+                opponentConnected = true;
+                document.getElementById('roomPanel').style.display = 'none';
+                document.getElementById('boardPanel').style.display = 'block';
+                document.getElementById('btnGroup').style.display = 'flex';
+                document.getElementById('gameInfo').style.display = 'block';
+                initBoard();
+                drawBoard();
+                myPlayer = 1;
+                isMyTurn = true;
+                updateStatus();
+            });
+        }
+        
+        function joinRoom() {
+            const inputId = document.getElementById('roomIdInput').value.trim();
+            if (!inputId) { alert('请输入房间号'); return; }
+            
+            peer = new Peer();
+            peer.on('open', () => {
+                conn = peer.connect(inputId);
+                setupConnection();
+                document.getElementById('connStatus').textContent = '连接中...';
+                document.getElementById('connStatus').className = 'connection-status connecting';
+            });
+            
+            peer.on('error', (err) => {
+                alert('连接失败，请检查房间号是否正确');
+            });
+        }
+        
+        function setupConnection() {
+            conn.on('open', () => {
+                document.getElementById('connStatus').textContent = '已连接';
+                document.getElementById('connStatus').className = 'connection-status connected';
+                if (myPlayer === 0) {
+                    myPlayer = 2;
+                    isMyTurn = false;
+                    document.getElementById('roomPanel').style.display = 'none';
+                    document.getElementById('boardPanel').style.display = 'block';
+                    document.getElementById('btnGroup').style.display = 'flex';
+                    document.getElementById('gameInfo').style.display = 'block';
+                    document.getElementById('status').style.display = 'block';
+                    initBoard();
+                    drawBoard();
+                    updateStatus();
+                }
+            });
+            
+            conn.on('data', (data) => {
+                if (data.type === 'move') handleMove(data);
+                if (data.type === 'restart') handleRestart();
+                if (data.type === 'restart-ack') { alert('对方同意重玩！'); restartGame(); }
+                if (data.type === 'restart-sync') restartGame();
+            });
+            
+            conn.on('close', () => {
+                alert('对方已离开房间');
+                location.reload();
+            });
+        }
+        
+        function copyRoomId() {
+            const id = document.getElementById('roomIdText').textContent;
+            navigator.clipboard.writeText(id).then(() => alert('房间号已复制！'));
+        }
+        
+        initBoard();
+    </script>
+</body>
+</html>
